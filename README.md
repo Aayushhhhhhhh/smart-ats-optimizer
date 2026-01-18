@@ -6,7 +6,6 @@ An AI-powered resume optimization tool that helps job seekers improve their resu
 
 **Try it now:** [https://smart-ats-optimizer-25sxivjo9gqdvezegc627k.streamlit.app/](https://smart-ats-optimizer-25sxivjo9gqdvezegc627k.streamlit.app/)
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://smart-ats-optimizer-25sxivjo9gqdvezegc627k.streamlit.app/)
 
 ## Overview
 
@@ -136,10 +135,6 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 - [ ] Industry-specific optimization
 - [ ] Export analysis reports as PDF
 - [ ] Resume version comparison
-
-## License
-
-This project is open source and available under the [MIT License](LICENSE).
 
 ## Acknowledgments
 
