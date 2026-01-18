@@ -1,0 +1,6 @@
+streamlit
+langchain-openai
+langchain-community
+scikit-learn
+PyPDF2
+python-dotenv
