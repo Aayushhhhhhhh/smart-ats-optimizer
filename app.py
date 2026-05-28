@@ -1,112 +1,315 @@
 import streamlit as st
-import os
-import PyPDF2 as pdf
 from langchain_openai import ChatOpenAI
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+from utils.pdf_parser import extract_text_from_pdf
+from utils.scorer import calculate_hybrid_score, extract_missing_keywords
 
-# 1. Configuration & Setup
-st.set_page_config(page_title="Smart ATS: Resume Optimizer", layout="wide")
-st.title("Smart ATS: Resume Optimizer 🚀")
-st.markdown("### Improve Your Resume Ranking with AI & Math")
+st.set_page_config(
+    page_title="Smart ATS Optimizer",
+    page_icon="🎯",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-# 2. Sidebar Inputs
-st.sidebar.header("Job Details")
-jd = st.sidebar.text_area("Paste the Job Description (JD) here:", height=300)
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
+    html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+    h1, h2, h3 { font-family: 'Syne', sans-serif !important; }
 
-# 3. API Key Management
+    .score-card {
+        background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 100%);
+        border: 1px solid rgba(99,102,241,0.3);
+        border-radius: 16px; padding: 24px; text-align: center; color: white;
+    }
+    .score-number {
+        font-family: 'Syne', sans-serif; font-size: 3.5rem; font-weight: 800;
+        background: linear-gradient(135deg, #818cf8, #38bdf8);
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent; line-height: 1;
+    }
+    .score-label { font-size: 0.8rem; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(255,255,255,0.5); margin-top: 6px; }
+    .sub-score {
+        background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 10px; padding: 12px 16px; margin-top: 8px;
+        display: flex; justify-content: space-between; align-items: center;
+        color: white; font-size: 0.88rem;
+    }
+    .keyword-pill {
+        display: inline-block; background: rgba(239,68,68,0.15);
+        border: 1px solid rgba(239,68,68,0.4); color: #fca5a5;
+        border-radius: 20px; padding: 4px 12px; margin: 4px; font-size: 0.82rem;
+    }
+    .keyword-pill-green {
+        display: inline-block; background: rgba(34,197,94,0.15);
+        border: 1px solid rgba(34,197,94,0.4); color: #86efac;
+        border-radius: 20px; padding: 4px 12px; margin: 4px; font-size: 0.82rem;
+    }
+    .india-badge {
+        display: inline-block; background: linear-gradient(135deg, rgba(255,153,0,0.2), rgba(19,136,8,0.2));
+        border: 1px solid rgba(255,153,0,0.4); color: #fcd34d;
+        border-radius: 8px; padding: 3px 12px; font-size: 0.78rem; letter-spacing: 0.06em;
+    }
+    .company-badge {
+        display: inline-block; background: rgba(99,102,241,0.2);
+        border: 1px solid rgba(99,102,241,0.4); color: #a5b4fc;
+        border-radius: 8px; padding: 3px 12px; font-size: 0.78rem;
+    }
+    .stButton > button {
+        background: linear-gradient(135deg, #6366f1, #38bdf8) !important;
+        color: white !important; border: none !important; border-radius: 10px !important;
+        padding: 0.6rem 2rem !important; font-family: 'Syne', sans-serif !important;
+        font-weight: 600 !important; font-size: 1rem !important; width: 100%;
+    }
+    .progress-bar-wrap { background: rgba(255,255,255,0.08); border-radius: 8px; height: 8px; margin-top: 4px; }
+    .progress-bar-fill { height: 8px; border-radius: 8px; background: linear-gradient(90deg, #6366f1, #38bdf8); }
+</style>
+""", unsafe_allow_html=True)
+
+# API Key
 try:
     api_key = st.secrets["OPENROUTER_API_KEY"]
-except:
-    st.error("API Key missing. Please set OPENROUTER_API_KEY in Streamlit Secrets.")
+except Exception:
+    st.error("⚠️ API Key missing. Add OPENROUTER_API_KEY to Streamlit Secrets.")
     st.stop()
 
-# --- HELPER FUNCTIONS ---
+def get_llm_response(prompt: str) -> str:
+    try:
+        llm = ChatOpenAI(
+            openai_api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+            model_name="meta-llama/llama-3.3-70b-instruct:free",
+            temperature=0.0, request_timeout=60,
+        )
+        return llm.invoke(prompt).content
+    except Exception as e:
+        return f"⚠️ AI analysis unavailable: {str(e)}"
 
-def input_pdf_text(uploaded_file):
-    """Extracts text from the uploaded PDF file."""
-    reader = pdf.PdfReader(uploaded_file)
-    text = ""
-    for page in range(len(reader.pages)):
-        page = reader.pages[page]
-        text += str(page.extract_text())
-    return text
+def score_color(score: float) -> str:
+    if score >= 75: return "#22c55e"
+    elif score >= 50: return "#f59e0b"
+    return "#ef4444"
 
-def calculate_match_score(resume_text, jd_text):
-    """
-    Calculates the percentage match between the resume and JD 
-    using Cosine Similarity (Vector Math).
-    """
-    # Create a list of text
-    text_list = [resume_text, jd_text]
-    cv = CountVectorizer()
-    count_matrix = cv.fit_transform(text_list)
-    
-    # Calculate cosine similarity
-    matchPercentage = cosine_similarity(count_matrix)[0][1] * 100
-    return round(matchPercentage, 2)
+def score_status(score: float):
+    if score >= 75: return "✅ Strong Match"
+    elif score >= 50: return "⚠️ Moderate Match"
+    return "❌ Low Match"
 
-def get_llm_response(input_text):
-    """Calls the LLM to get a qualitative analysis."""
-    llm = ChatOpenAI(
-        openai_api_key=api_key,
-        base_url="https://openrouter.ai/api/v1",
-        model_name="meta-llama/llama-3.3-70b-instruct:free",
-        temperature=0.0
-    )
-    response = llm.invoke(input_text)
-    return response.content
+def progress_bar(score: float, color: str = None) -> str:
+    c = color or score_color(score)
+    return f"""
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-fill" style="width:{score}%; background: linear-gradient(90deg, {c}, {c}cc);"></div>
+    </div>"""
 
-# --- MAIN APP LOGIC ---
+# Sidebar
+with st.sidebar:
+    st.markdown("## 🎯 Smart ATS Optimizer")
+    st.markdown('<span class="india-badge">🇮🇳 India Edition</span>', unsafe_allow_html=True)
+    st.markdown("*Optimized for Naukri, TCS, Infosys, Wipro & more*")
+    st.divider()
 
-uploaded_file = st.file_uploader("Upload Your Resume (PDF)", type="pdf", help="Please upload the pdf")
+    jd = st.text_area("📋 Paste Job Description", height=300,
+        placeholder="Paste the full job description here...\n\nWorks best with Naukri JDs, LinkedIn India, Foundit")
 
-submit = st.button("Evaluate Resume")
+    uploaded_file = st.file_uploader("📄 Upload Resume (PDF)", type=["pdf"],
+        help="Supports multi-column resumes via pdfplumber")
 
-if submit:
-    if uploaded_file is not None and jd:
-        # A. Processing
-        with st.spinner('Parsing PDF and Calculating Score...'):
-            resume_text = input_pdf_text(uploaded_file)
-            
-            # B. The MATH (Cosine Similarity)
-            match_score = calculate_match_score(resume_text, jd)
-        
-        # Display Score nicely
-        st.divider()
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.metric("ATS Match Score", f"{match_score}%")
-            if match_score < 50:
-                st.error("⚠️ Low Match: Your resume might be filtered out.")
-            elif match_score < 75:
-                st.warning("⚠️ Moderate Match: Needs improvement.")
-            else:
-                st.success("✅ High Match: Looking good!")
+    st.divider()
+    submit = st.button("🚀 Evaluate Resume", use_container_width=True)
+    st.markdown("""
+    <div style='font-size:0.72rem; color:rgba(255,255,255,0.3); margin-top:12px;'>
+    Scoring: 30% keywords + 40% semantic + 20% India taxonomy + 10% ATS formatting
+    </div>""", unsafe_allow_html=True)
 
-        # C. The AI (Qualitative Analysis)
-        with col2:
-            st.subheader("🤖 AI Analysis")
-            with st.spinner('Generating detailed feedback...'):
-                input_prompt = f"""
-                Act as a skilled Application Tracking System (ATS) and Technical Recruiter with deep knowledge of tech field. 
-                Your goal is to evaluate the resume against the job description.
-                
-                Resume Text:
-                {resume_text}
-                
-                Job Description:
-                {jd}
-                
-                PROVIDE THE FOLLOWING IN MARKDOWN FORMAT:
-                1. **Missing Keywords:** List the critical technical keywords from the JD that are missing in the resume.
-                2. **Profile Summary Rewrite:** Write a crisp, 3-sentence profile summary optimized for this JD.
-                3. **Action Plan:** Give 3 specific bullet points on what to change in the "Projects" or "Experience" section to increase the match score.
-                """
-                
-                response = get_llm_response(input_prompt)
-                st.markdown(response)
+# Main
+st.markdown("# Smart ATS Optimizer 🎯")
+st.markdown("##### Hybrid AI scoring — built for the Indian job market")
 
+if not submit:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.info("**Step 1**\n\nPaste Job Description from Naukri, LinkedIn India, or Foundit")
+    with col2:
+        st.info("**Step 2**\n\nUpload your resume PDF")
+    with col3:
+        st.info("**Step 3**\n\nGet your India ATS score with company-specific feedback")
+
+    st.markdown("---")
+    st.markdown("""
+    **Phase 2 — India Edition includes:**
+    - 🇮🇳 **India Skills Taxonomy** — 100+ skills from Naukri/LinkedIn India 2025-26
+    - 🏢 **Company-specific scoring** — TCS, Infosys, Wipro, HCL, Cognizant, Accenture, Tech Mahindra, Capgemini
+    - 🏭 **Sector scoring** — IT Services, Fintech/BFSI, Startups, E-commerce
+    - 📝 **ATS formatting check** — action verbs, positive flags, standard headers
+    - 🔬 **Hybrid matching** — TF-IDF + semantic + India taxonomy
+    """)
+
+else:
+    # Validation
+    if not uploaded_file:
+        st.warning("⚠️ Please upload a PDF resume.")
+        st.stop()
+    if not jd or len(jd.strip()) < 50:
+        st.warning("⚠️ Please paste a job description (at least 50 characters).")
+        st.stop()
+
+    # Parse PDF
+    with st.spinner("📄 Parsing resume..."):
+        try:
+            resume_text = extract_text_from_pdf(uploaded_file)
+        except ValueError as e:
+            st.error(str(e))
+            st.stop()
+
+    if len(resume_text.strip()) < 100:
+        st.error("❌ Could not extract enough text. Make sure it's a text-based PDF.")
+        st.stop()
+
+    # Score
+    with st.spinner("🔬 Running India ATS analysis..."):
+        scores = calculate_hybrid_score(resume_text, jd)
+        missing_keywords = extract_missing_keywords(resume_text, jd, top_n=15)
+
+    st.divider()
+
+    # ── Score Layout ──────────────────────────────────────────────────────────
+    col_main, col_breakdown = st.columns([1, 1.8])
+
+    with col_main:
+        # Company & sector detection badges
+        badge_html = ""
+        if scores.get("target_company"):
+            badge_html += f'<span class="company-badge">🏢 {scores["target_company"].upper()}</span> '
+        if scores.get("sector"):
+            sector_display = scores["sector"].replace("_", " ").title()
+            badge_html += f'<span class="india-badge">🏭 {sector_display}</span>'
+        if badge_html:
+            st.markdown(badge_html, unsafe_allow_html=True)
+            st.markdown("")
+
+        st.markdown(f"""
+        <div class="score-card">
+            <div class="score-number">{scores["final_score"]}%</div>
+            <div class="score-label">India ATS Match Score</div>
+            <div style="margin-top:14px; font-size:1.05rem;">{score_status(scores["final_score"])}</div>
+            <div style="margin-top:8px; font-size:0.75rem; color:rgba(255,255,255,0.4);">
+                {"🔀 Hybrid + India" if "hybrid" in scores["method"] else "📊 TF-IDF + India"}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Sub-scores
+        for label, key in [
+            ("📊 Keyword Match", "keyword_score"),
+            ("🧠 Semantic Match", "semantic_score"),
+            ("🇮🇳 India Taxonomy", "india_skill_score"),
+            ("🏢 Company Match", "company_score"),
+            ("🏭 Sector Match", "sector_score"),
+            ("📝 ATS Formatting", "formatting_score"),
+        ]:
+            val = scores.get(key)
+            if val is None:
+                continue
+            color = score_color(val)
+            st.markdown(f"""
+            <div class="sub-score">
+                <span>{label}</span>
+                <strong style="color:{color}">{val}%</strong>
+            </div>
+            {progress_bar(val, color)}
+            """, unsafe_allow_html=True)
+
+    with col_breakdown:
+        # Overall interpretation
+        if scores["final_score"] >= 75:
+            st.success(f"✅ **Strong Match** — Your resume is well-aligned. "
+                       "Focus on quantifying achievements and polishing your summary.")
+        elif scores["final_score"] >= 50:
+            st.warning(f"⚠️ **Moderate Match** — Good foundation. "
+                       "Add missing keywords naturally and strengthen experience bullets.")
+        else:
+            st.error(f"❌ **Low Match** — Significant work needed. "
+                     "Review all missing keywords and restructure around this role.")
+
+        # Company-specific feedback
+        if scores.get("target_company") and scores.get("company_score", 0) < 80:
+            company = scores["target_company"].upper()
+            matched = scores.get("company_matched", [])
+            missing_co = scores.get("company_missing", [])
+
+            with st.expander(f"🏢 {company}-Specific Analysis", expanded=True):
+                if matched:
+                    matched_html = "".join(f'<span class="keyword-pill-green">{k}</span>' for k in matched)
+                    st.markdown(f"**✅ Matched:** {matched_html}", unsafe_allow_html=True)
+                if missing_co:
+                    missing_html = "".join(f'<span class="keyword-pill">{k}</span>' for k in missing_co)
+                    st.markdown(f"**❌ Missing:** {missing_html}", unsafe_allow_html=True)
+
+        # ATS formatting signals
+        with st.expander("📝 ATS Formatting Signals"):
+            av = scores.get("action_verbs_found", 0)
+            af = scores.get("ats_flags_found", 0)
+            st.markdown(f"""
+            - **Action verbs detected:** {av}/{len(['created','implemented','developed','optimized','deployed','automated','architected','migrated','engineered','delivered'])} ({'✅ Good' if av >= 6 else '⚠️ Add more strong action verbs'})
+            - **ATS positive flags:** {af}/{len(['scalability','agile methodology','cloud migration','ci cd','sdlc','stakeholder management','end to end delivery','high performance'])} ({'✅ Good' if af >= 4 else '⚠️ Add more professional buzzwords'})
+            """)
+
+        # India skills matched
+        if scores.get("india_skills_matched"):
+            with st.expander("🇮🇳 India Market Skills — Matched"):
+                pills = "".join(f'<span class="keyword-pill-green">{s}</span>'
+                                for s in scores["india_skills_matched"])
+                st.markdown(pills, unsafe_allow_html=True)
+
+    st.divider()
+
+    # ── Missing Keywords ──────────────────────────────────────────────────────
+    st.markdown("### 🔍 Missing Keywords (Prioritized)")
+    if missing_keywords:
+        st.caption("India-taxonomy keywords shown first — these have highest ATS impact.")
+        pills = "".join(f'<span class="keyword-pill">{kw}</span>' for kw in missing_keywords)
+        st.markdown(f'<div style="margin:12px 0">{pills}</div>', unsafe_allow_html=True)
     else:
-        st.warning("Please upload a PDF Resume and paste the Job Description.")
+        st.success("✅ Excellent keyword coverage!")
+
+    st.divider()
+
+    # ── AI Analysis ───────────────────────────────────────────────────────────
+    st.markdown("### 🤖 AI-Powered Feedback")
+
+    with st.spinner("Generating detailed feedback..."):
+        company_ctx = f"targeting {scores['target_company'].upper()}" if scores.get("target_company") else "for an Indian company"
+        sector_ctx = scores.get("sector", "IT").replace("_", " ")
+        missing_str = ", ".join(missing_keywords[:10]) if missing_keywords else "None"
+
+        prompt = f"""
+You are a senior Technical Recruiter specializing in the Indian job market.
+Evaluate this resume for a {sector_ctx} role {company_ctx}.
+
+ATS Score: {scores["final_score"]}% (Keyword: {scores["keyword_score"]}%, Semantic: {scores.get("semantic_score","N/A")}%, India Taxonomy: {scores["india_skill_score"]}%)
+Missing keywords: {missing_str}
+
+Resume (first 3000 chars):
+{resume_text[:3000]}
+
+Job Description (first 2000 chars):
+{jd[:2000]}
+
+Respond EXACTLY in this format:
+
+## 📝 Optimized Profile Summary
+Write a 3-sentence profile summary highly optimized for this specific JD and Indian market. Use keywords naturally.
+
+## 🎯 Top 3 Action Items
+Give 3 specific, concrete changes. For each: mention the exact section, what to add/change, and why it helps the ATS score.
+
+## 🇮🇳 India Market Insight
+In 2-3 sentences: what specific skills or keywords are most valued for this role in the Indian market right now, and how does this resume compare.
+"""
+        ai_response = get_llm_response(prompt)
+        st.markdown(ai_response)
+
+    st.divider()
+
+    with st.expander("🔎 View Extracted Resume Text"):
+        st.text_area("Verify parsing quality:", resume_text, height=250)
+        st.caption(f"Characters extracted: {len(resume_text):,}")
